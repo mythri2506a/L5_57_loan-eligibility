@@ -1,3 +1,5 @@
 __pycache__/
 .venv/
 loans.bin
+loans.json
+venv/
