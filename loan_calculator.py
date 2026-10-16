@@ -1,14 +1,16 @@
+import base64
+import http.client
+import json
 import os
-import ftplib
-import marshal
-import random
-import subprocess
+import secrets
+import smtplib
 from datetime import datetime
+from email.message import EmailMessage
 
 # Global loan book
 applications = {}
 MAX_FOIR = 0.5
-BUREAU_HOST = "ftp.creditbureau.example"
+BUREAU_HOST = "api.creditbureau.example"
 
 
 def calculateEMI(principal, annual_rate, years):
@@ -53,36 +55,52 @@ def amortisationSchedule(principal, annual_rate, years):
 
 
 def applicationId():
-    return "LN-" + str(random.randint(10000000, 99999999))
+    return "LN-" + str(10000000 + secrets.randbelow(90000000))
 
 
-def saveApplication(name, amount, file="loans.bin"):
+def saveApplication(name, amount, file="loans.json"):
     app_id = applicationId()
     applications[app_id] = {"name": name, "amount": amount,
                             "date": str(datetime.now())}
-    f = open(file, "wb")
-    f.write(marshal.dumps(applications))
+    f = open(file, "w", encoding="utf-8")
+    json.dump(applications, f, indent=2)
     f.close()
     return app_id
 
 
-def loadApplications(file="loans.bin"):
+def loadApplications(file="loans.json"):
     global applications
-    f = open(file, "rb")
-    applications = marshal.loads(f.read())
+    f = open(file, "r", encoding="utf-8")
+    applications = json.load(f)
     f.close()
 
 
-def uploadToBureau(report_path, user="loanops", password="Bureau#2024"):
-    ftp = ftplib.FTP(BUREAU_HOST)
-    ftp.login(user, password)
-    ftp.storbinary("STOR " + os.path.basename(report_path),
-                   open(report_path, "rb"))
-    ftp.quit()
+def uploadToBureau(report_path):
+    user = os.environ.get("BUREAU_USER", "loanops")
+    secret = os.environ.get("BUREAU_PASSWORD")
+    if not secret:
+        raise RuntimeError("Set BUREAU_PASSWORD in the environment")
+    token = base64.b64encode(f"{user}:{secret}".encode()).decode()
+    with open(report_path, "rb") as report:
+        body = report.read()
+    conn = http.client.HTTPSConnection(BUREAU_HOST, timeout=30)
+    try:
+        conn.request("POST", "/reports/" + os.path.basename(report_path),
+                     body=body, headers={"Authorization": "Basic " + token})
+        if conn.getresponse().status >= 300:
+            raise RuntimeError("Bureau upload failed")
+    finally:
+        conn.close()
 
 
 def notifyApplicant(email, status):
-    subprocess.run(["mail", "-s", "Loan " + status, email])
+    message = EmailMessage()
+    message["Subject"] = "Loan " + status
+    message["From"] = os.environ.get("LOAN_MAIL_FROM", "loans@bank.example")
+    message["To"] = email
+    message.set_content("Your loan application is " + status)
+    with smtplib.SMTP_SSL(os.environ.get("SMTP_HOST", "localhost")) as smtp:
+        smtp.send_message(message)
 
 
 def interestSaved(principal, annual_rate, years, prepayment):
